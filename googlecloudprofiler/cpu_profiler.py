@@ -1,17 +1,4 @@
-# Copyright 2018 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""CPU time profiler."""
+"""Latest working version of Memory profiler."""
 
 import logging
 from googlecloudprofiler import _profiler
@@ -24,6 +11,31 @@ import collections
 
 logger = logging.getLogger(__name__)
 
+def traverse(node_index, nodes, strings, current_stack, traces):
+    """
+    Recursively traverse the tree, accumulating the full call stack.
+    For each leaf node, record the complete call chain with its sample count.
+    """
+    # Only add frames for nodes that represent an actual frame (nonzero name).
+    if nodes['name'][node_index] != 0:
+        frame = (
+            strings[nodes['name'][node_index]],
+            strings[nodes['filename'][node_index]],
+            nodes['lineno'][node_index],
+        )
+        current_stack.append(frame)
+
+    # If this node is a leaf, record the complete stack.
+    if not nodes['children'][node_index]:
+        traces[tuple(current_stack)] += nodes['value'][node_index]
+    else:
+        # Otherwise, traverse each child.
+        for child in nodes['children'][node_index]:
+            traverse(child, nodes, strings, current_stack, traces)
+
+    # Pop the current frame if it was added.
+    if nodes['name'][node_index] != 0:
+        current_stack.pop()
 
 class CPUProfiler:
   """CPU time profiler.
@@ -71,35 +83,40 @@ class CPUProfiler:
 
     # This requires that the program is run with memray and the bin output file is named "some_output_file.bin"
     with FileReader(self._dump_file_name, report_progress=True) as reader:
-      snapshot = reader.get_high_watermark_allocation_records()
-      memory_records = tuple(reader.get_memory_snapshots())
-      reporter = FlameGraphReporter.from_snapshot(
-          snapshot,
-          memory_records=memory_records,
-          native_traces=False,
-          inverted=False,
-      )
+        snapshot = reader.get_high_watermark_allocation_records()
+        memory_records = tuple(reader.get_memory_snapshots())
+        reporter = FlameGraphReporter.from_snapshot(
+            snapshot,
+            memory_records=memory_records,
+            native_traces=False,
+            inverted=True,
+        )
 
-    Func = collections.namedtuple("Func", ["name", "filename"])
-    Loc = collections.namedtuple("Loc", ["func_id", "line_number"])
+    Func = collections.namedtuple('Func', ['name', 'filename'])
+    Loc = collections.namedtuple('Loc', ['func_id', 'line_number'])
+
 
     # Convert memray data to pprof format
     traces = collections.defaultdict(int)
 
     nodes = reporter.data["nodes"]
     strings = reporter.data["strings"]
+    
+    # Start traversal at the root (assumed to be node 0).
+    traverse(0, nodes, strings, [], traces)
 
-    # When creating the traces dictionary.
-    traces[tuple(self.build_stack(0, nodes, strings))] = nodes['value'][0]
-    for i in range(len(nodes['value'])):
-      traces[tuple(self.build_stack(i, nodes, strings))
-            ] = nodes['value'][i]
 
-    for i in range(len(nodes['value'])):
-      if nodes['value'][i] > 0:
-        stack = self.build_stack(i, nodes, strings)
-        # print("Stack for node", i, ":", stack)
-        traces[tuple(stack)] += nodes['value'][i]
+    # # When creating the traces dictionary.
+    # traces[tuple(self.build_stack(0, nodes, strings))] = nodes['value'][0]
+    # for i in range(len(nodes['value'])):
+    #   traces[tuple(self.build_stack(i, nodes, strings))
+    #         ] = nodes['value'][i]
+
+    # for i in range(len(nodes['value'])):
+    #   if nodes['value'][i] > 0:
+    #     stack = self.build_stack(i, nodes, strings)
+    #     # print("Stack for node", i, ":", stack)
+    #     traces[tuple(stack)] += nodes['value'][i]
 
     return self._build_profile(duration_ns, traces)
 
@@ -110,4 +127,6 @@ class CPUProfiler:
     profile_builder = builder.Builder()
     profile_builder.populate_profile(traces, self._profile_type, 'nanoseconds',
                                       self._period_ms * 1000 * 1000, duration_ns)
+    # profile_builder.populate_profile(traces, self._profile_type, 'bytes',
+    #                                   1, 0)
     return profile_builder.emit()
